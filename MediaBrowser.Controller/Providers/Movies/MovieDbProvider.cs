@@ -1,13 +1,4 @@
-﻿using MediaBrowser.Common.Extensions;
-using MediaBrowser.Common.Net;
-using MediaBrowser.Controller.Configuration;
-using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Entities.Movies;
-using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Logging;
-using MediaBrowser.Model.Net;
-using MediaBrowser.Model.Serialization;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -17,15 +8,25 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Common.Extensions;
+using MediaBrowser.Common.Net;
+using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Logging;
+using MediaBrowser.Model.Net;
+using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Providers.Movies
 {
     class MovieDbProviderException : ApplicationException
     {
-        public MovieDbProviderException(string msg) : base(msg)
+        public MovieDbProviderException(string msg)
+            : base(msg)
         {
         }
-     
+
     }
     /// <summary>
     /// Class MovieDbProvider
@@ -33,11 +34,11 @@ namespace MediaBrowser.Controller.Providers.Movies
     public class MovieDbProvider : BaseMetadataProvider, IDisposable
     {
         protected readonly IProviderManager ProviderManager;
-        
+
         /// <summary>
         /// The movie db
         /// </summary>
-        internal readonly SemaphoreSlim MovieDbResourcePool = new SemaphoreSlim(4, 4);
+        internal readonly SemaphoreSlim MovieDbResourcePool = new SemaphoreSlim(5, 5);
 
         internal static MovieDbProvider Current { get; private set; }
 
@@ -171,7 +172,7 @@ namespace MediaBrowser.Controller.Providers.Movies
                         backdrop_sizes =
                             new List<string>
                                                                                                      {
-                                                                                                         "w380",
+                                                                                                         "w300",
                                                                                                          "w780",
                                                                                                          "w1280",
                                                                                                          "original"
@@ -194,10 +195,21 @@ namespace MediaBrowser.Controller.Providers.Movies
                                                                                                          "h632",
                                                                                                          "original"
                                                                                                      },
-                        base_url = "http://cf2.imgobject.com/t/p/"
-
+                        logo_sizes =
+                            new List<string>
+                                                                                                     {
+                                                                                                         "w45",
+                                                                                                         "w92",
+                                                                                                         "w154",
+                                                                                                         "w185",
+                                                                                                         "w300",
+                                                                                                         "w500",
+                                                                                                         "original"
+                                                                                                     },
+                        base_url = "http://d3gtl9l2a4fn1j.cloudfront.net/t/p/",
+                        secure_base_url = "https://d3gtl9l2a4fn1j.cloudfront.net/t/p/"
                     }
-                }; 
+                };
             }
         }
 
@@ -229,12 +241,10 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         private const string TmdbConfigUrl = "http://api.themoviedb.org/3/configuration?api_key={0}";
-        private const string Search3 = @"http://api.themoviedb.org/3/search/movie?api_key={1}&query={0}&language={2}";
-        private const string AltTitleSearch = @"http://api.themoviedb.org/3/movie/{0}/alternative_titles?api_key={1}&country={2}";
-        private const string GetInfo3 = @"http://api.themoviedb.org/3/{3}/{0}?api_key={1}&language={2}";
-        private const string CastInfo = @"http://api.themoviedb.org/3/movie/{0}/casts?api_key={1}";
-        private const string ReleaseInfo = @"http://api.themoviedb.org/3/movie/{0}/releases?api_key={1}";
-        private const string GetImages = @"http://api.themoviedb.org/3/{2}/{0}/images?api_key={1}";
+        private const string TmdbSearch = @"http://api.themoviedb.org/3/search/movie?api_key={1}&query={0}&language={2}";
+        private const string TmdbAlternateTitles = @"http://api.themoviedb.org/3/movie/{0}/alternative_titles?api_key={1}&country={2}";
+        private const string TmdbFetchLight = @"http://api.themoviedb.org/3/{3}/{0}?api_key={1}&language={2}";
+        private const string TmdbFetch = @"http://api.themoviedb.org/3/{3}/{0}?api_key={1}&language={2}&append_to_response=casts,images,releases,alternative_titles";
         public static string ApiKey = "f6bd687ffa63cd282b6ff2c6877f2669";
 
         static readonly Regex[] NameMatches = new[] {
@@ -244,7 +254,6 @@ namespace MediaBrowser.Controller.Providers.Movies
 
         public const string LOCAL_META_FILE_NAME = "MBMovie.json";
         public const string ALT_META_FILE_NAME = "movie.xml";
-        protected string ItemType = "movie";
 
         protected override bool NeedsRefreshInternal(BaseItem item, BaseProviderInfo providerInfo)
         {
@@ -490,7 +499,7 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// <returns>Task{System.String}.</returns>
         public virtual async Task<string> AttemptFindId(string name, int? year, string language, CancellationToken cancellationToken)
         {
-            string url3 = string.Format(Search3, UrlEncode(name), ApiKey, language);
+            string url3 = string.Format(TmdbSearch, UrlEncode(name), ApiKey, language);
             TmdbMovieSearchResults searchResult = null;
 
             try
@@ -523,7 +532,7 @@ namespace MediaBrowser.Controller.Providers.Movies
                     }
                 }
                 Logger.Info("MovieDBProvider - No results.  Trying replacement numbers: " + name);
-                url3 = string.Format(Search3, UrlEncode(name), ApiKey, language);
+                url3 = string.Format(TmdbSearch, UrlEncode(name), ApiKey, language);
 
                 try
                 {
@@ -562,7 +571,7 @@ namespace MediaBrowser.Controller.Providers.Movies
                     if (matchedName == null)
                     {
                         //that title didn't match - look for alternatives
-                        url3 = string.Format(AltTitleSearch, id, ApiKey, ConfigurationManager.Configuration.MetadataCountryCode);
+                        url3 = string.Format(TmdbAlternateTitles, id, ApiKey, ConfigurationManager.Configuration.MetadataCountryCode);
 
                         try
                         {
@@ -577,13 +586,11 @@ namespace MediaBrowser.Controller.Providers.Movies
                                         var t = GetComparableName(title.title, Logger);
                                         if (t == compName)
                                         {
-                                            Logger.Debug("MovieDbProvider - " + compName +
-                                                                " matched " + t);
+                                            Logger.Debug("MovieDbProvider - " + compName + " matched " + t);
                                             matchedName = t;
                                             break;
                                         }
-                                        Logger.Debug("MovieDbProvider - " + compName +
-                                                            " did not match " + t);
+                                        Logger.Debug("MovieDbProvider - " + compName + " did not match " + t);
                                     }
                                 }
                             }
@@ -643,7 +650,7 @@ namespace MediaBrowser.Controller.Providers.Movies
             string childId = await AttemptFindId(name, year, language, cancellationToken).ConfigureAwait(false);
             if (childId != null)
             {
-                string url = string.Format(GetInfo3, childId, ApiKey, language, ItemType);
+                string url = string.Format(TmdbFetchLight, childId, ApiKey, language, "movie");
 
                 try
                 {
@@ -684,46 +691,31 @@ namespace MediaBrowser.Controller.Providers.Movies
                 Logger.Info("MoviedbProvider: Ignoring " + item.Name + " because ID forced blank.");
                 return;
             }
-            if (item.GetProviderId(MetadataProviders.Tmdb) == null) item.SetProviderId(MetadataProviders.Tmdb, id);
-            var mainTask = FetchMainResult(item, id, cancellationToken);
-            var castTask = FetchCastInfo(item, id, cancellationToken);
-            var releaseTask = FetchReleaseInfo(item, id, cancellationToken);
-            var imageTask = FetchImageInfo(item, id, cancellationToken);
 
-            await Task.WhenAll(mainTask, castTask, releaseTask).ConfigureAwait(false);
+            if (item.GetProviderId(MetadataProviders.Tmdb) == null)
+                item.SetProviderId(MetadataProviders.Tmdb, id);
+
+            CompleteMovieData data = await FetchTmdbMovie(item, id, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            var mainResult = mainTask.Result;
-            if (mainResult == null) return;
+            if (data == null)
+                return;
 
-            if (castTask.Result != null)
-            {
-                mainResult.cast = castTask.Result.cast;
-                mainResult.crew = castTask.Result.crew;
-            }
-
-            if (releaseTask.Result != null)
-            {
-                mainResult.countries = releaseTask.Result.countries;
-            }
-
-            ProcessMainInfo(item, mainResult);
-
-            await Task.WhenAll(imageTask).ConfigureAwait(false);
+            ProcessMainInfo(item, data);
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (imageTask.Result != null)
+            if (data.images != null)
             {
-                await ProcessImages(item, imageTask.Result, cancellationToken).ConfigureAwait(false);
+                await ProcessImages(item, data.images, cancellationToken).ConfigureAwait(false);
             }
 
             //and save locally
             if (ConfigurationManager.Configuration.SaveLocalMeta)
             {
                 var ms = new MemoryStream();
-                JsonSerializer.SerializeToStream(mainResult, ms);
+                JsonSerializer.SerializeToStream(data, ms);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -732,16 +724,13 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         /// <summary>
-        /// Fetches the main result.
+        /// Fetches the specific movie-id's data.
+        /// Reverts to english language movies if the preferred language is unavailable.
         /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="id">The id.</param>
-        /// <param name="cancellationToken">The cancellation token</param>
-        /// <returns>Task{CompleteMovieData}.</returns>
-        protected async Task<CompleteMovieData> FetchMainResult(BaseItem item, string id, CancellationToken cancellationToken)
+        protected async Task<CompleteMovieData> FetchTmdbMovie(BaseItem item, string id, CancellationToken cancellationToken)
         {
-            ItemType = item is BoxSet ? "collection" : "movie";
-            string url = string.Format(GetInfo3, id, ApiKey, ConfigurationManager.Configuration.PreferredMetadataLanguage, ItemType);
+            string itemType = item is BoxSet ? "collection" : "movie";
+            string url = string.Format(TmdbFetch, id, ApiKey, ConfigurationManager.Configuration.PreferredMetadataLanguage, itemType);
             CompleteMovieData mainResult;
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -776,7 +765,7 @@ namespace MediaBrowser.Controller.Providers.Movies
                 if (ConfigurationManager.Configuration.PreferredMetadataLanguage.ToLower() != "en")
                 {
                     Logger.Info("MovieDbProvider couldn't find meta for language " + ConfigurationManager.Configuration.PreferredMetadataLanguage + ". Trying English...");
-                    url = string.Format(GetInfo3, id, ApiKey, "en", ItemType);
+                    url = string.Format(TmdbFetch, id, ApiKey, "en", itemType);
 
                     try
                     {
@@ -800,90 +789,6 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         /// <summary>
-        /// Fetches the cast info.
-        /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="id">The id.</param>
-        /// <param name="cancellationToken">The cancellation token</param>
-        /// <returns>Task{TmdbCastResult}.</returns>
-        protected async Task<TmdbCastResult> FetchCastInfo(BaseItem item, string id, CancellationToken cancellationToken)
-        {
-            //get cast and crew info
-            var url = string.Format(CastInfo, id, ApiKey);
-            TmdbCastResult cast = null;
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
-                {
-                    cast = JsonSerializer.DeserializeFromStream<TmdbCastResult>(json);
-                }
-            }
-            catch (HttpException)
-            {
-            }
-            return cast;
-        }
-
-        /// <summary>
-        /// Fetches the release info.
-        /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="id">The id.</param>
-        /// <param name="cancellationToken">The cancellation token</param>
-        /// <returns>Task{TmdbReleasesResult}.</returns>
-        protected async Task<TmdbReleasesResult> FetchReleaseInfo(BaseItem item, string id, CancellationToken cancellationToken)
-        {
-            var url = string.Format(ReleaseInfo, id, ApiKey);
-            TmdbReleasesResult releases = null;
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
-                {
-                    releases = JsonSerializer.DeserializeFromStream<TmdbReleasesResult>(json);
-                }
-            }
-            catch (HttpException)
-            {
-            }
-
-            return releases;
-        }
-
-        /// <summary>
-        /// Fetches the image info.
-        /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="id">The id.</param>
-        /// <param name="cancellationToken">The cancellation token</param>
-        /// <returns>Task{TmdbImages}.</returns>
-        protected async Task<TmdbImages> FetchImageInfo(BaseItem item, string id, CancellationToken cancellationToken)
-        {
-            //fetch images
-            var url = string.Format(GetImages, id, ApiKey, ItemType);
-            TmdbImages images = null;
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
-                {
-                    images = JsonSerializer.DeserializeFromStream<TmdbImages>(json);
-                }
-            }
-            catch (HttpException)
-            {
-            }
-            return images;
-        }
-
-        /// <summary>
         /// Processes the main info.
         /// </summary>
         /// <param name="movie">The movie.</param>
@@ -892,7 +797,6 @@ namespace MediaBrowser.Controller.Providers.Movies
         {
             if (movie != null && movieData != null)
             {
-
                 movie.Name = movieData.title ?? movieData.original_title ?? movie.Name;
                 movie.Overview = movieData.overview;
                 movie.Overview = movie.Overview != null ? movie.Overview.Replace("\n\n", "\n") : null;
@@ -965,17 +869,18 @@ namespace MediaBrowser.Controller.Providers.Movies
 
                 //Actors, Directors, Writers - all in People
                 //actors come from cast
-                if (movieData.cast != null)
+                if (movieData.casts != null)
                 {
-                    foreach (var actor in movieData.cast.OrderBy(a => a.order)) movie.AddPerson(new PersonInfo { Name = actor.name, Role = actor.character, Type = PersonType.Actor });
+                    if (movieData.casts.cast != null)
+                    {
+                        foreach (var actor in movieData.casts.cast.OrderBy(a => a.order)) movie.AddPerson(new PersonInfo { Name = actor.name, Role = actor.character, Type = PersonType.Actor });
+                    }
+                    //and the rest from crew
+                    if (movieData.casts.crew != null)
+                    {
+                        foreach (var person in movieData.casts.crew) movie.AddPerson(new PersonInfo { Name = person.name, Role = person.job, Type = person.department });
+                    }
                 }
-                //and the rest from crew
-                if (movieData.crew != null)
-                {
-                    foreach (var person in movieData.crew) movie.AddPerson(new PersonInfo { Name = person.name, Role = person.job, Type = person.department });
-                }
-
-
             }
 
         }
@@ -1505,11 +1410,6 @@ namespace MediaBrowser.Controller.Providers.Movies
         protected class TmdbAltTitleResults
         {
             /// <summary>
-            /// Gets or sets the id.
-            /// </summary>
-            /// <value>The id.</value>
-            public int id { get; set; }
-            /// <summary>
             /// Gets or sets the titles.
             /// </summary>
             /// <value>The titles.</value>
@@ -1521,11 +1421,6 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// </summary>
         protected class TmdbCastResult
         {
-            /// <summary>
-            /// Gets or sets the id.
-            /// </summary>
-            /// <value>The id.</value>
-            public int id { get; set; }
             /// <summary>
             /// Gets or sets the cast.
             /// </summary>
@@ -1603,11 +1498,6 @@ namespace MediaBrowser.Controller.Providers.Movies
         protected class TmdbImages
         {
             /// <summary>
-            /// Gets or sets the id.
-            /// </summary>
-            /// <value>The id.</value>
-            public int id { get; set; }
-            /// <summary>
             /// Gets or sets the backdrops.
             /// </summary>
             /// <value>The backdrops.</value>
@@ -1647,16 +1537,21 @@ namespace MediaBrowser.Controller.Providers.Movies
             public double vote_average { get; set; }
             public int vote_count { get; set; }
             public List<Country> countries { get; set; }
-            public List<Cast> cast { get; set; }
-            public List<Crew> crew { get; set; }
+
+            public TmdbImages images { get; set; }
+            public TmdbCastResult casts { get; set; }
+            public TmdbAltTitleResults alternative_titles { get; set; }
+            public TmdbReleasesResult releases { get; set; }
         }
 
         public class TmdbImageSettings
         {
             public List<string> backdrop_sizes { get; set; }
-            public string base_url { get; set; }
             public List<string> poster_sizes { get; set; }
             public List<string> profile_sizes { get; set; }
+            public List<string> logo_sizes { get; set; }
+            public string base_url { get; set; }
+            public string secure_base_url { get; set; }
         }
 
         public class TmdbSettingsResult
