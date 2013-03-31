@@ -1,4 +1,5 @@
-﻿using MediaBrowser.Common.IO;
+﻿using System.Text;
+using MediaBrowser.Common.IO;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Model.Entities;
@@ -418,72 +419,102 @@ namespace MediaBrowser.Controller.MediaInfo
         /// <exception cref="System.ApplicationException"></exception>
         private async Task<FFProbeResult> RunFFProbeInternal(string inputPath, bool extractChapters, string cacheFile, string probeSizeArgument, CancellationToken cancellationToken)
         {
-            var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    CreateNoWindow = true,
-                    UseShellExecute = false,
-
-                    // Must consume both or ffmpeg may hang due to deadlocks. See comments below.   
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    FileName = FFProbePath,
-                    Arguments = string.Format("{0} -i {1} -threads 0 -v info -print_format json -show_streams -show_format", probeSizeArgument, inputPath).Trim(),
-
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    ErrorDialog = false
-                },
-
-                EnableRaisingEvents = true
-            };
-
-            _logger.Debug("{0} {1}", process.StartInfo.FileName, process.StartInfo.Arguments);
-
-            process.Exited += ProcessExited;
-
             await FFProbeResourcePool.WaitAsync(cancellationToken).ConfigureAwait(false);
 
-            FFProbeResult result;
-            string standardError = null;
+            bool success;
+            StringBuilder output = new StringBuilder();
+            StringBuilder error = new StringBuilder();
 
+            int processId = -1;
             try
             {
-                process.Start();
-
-                Task<string> standardErrorReadTask = null;
-
-                // MUST read both stdout and stderr asynchronously or a deadlock may occurr
-                if (extractChapters)
+                // Code copied from StackOverflow, http://stackoverflow.com/questions/139593/processstartinfo-hanging-on-waitforexit-why
+                // The previous code had some issues when it tried to read from the redirected outputs, this code uses a different approach.
+                using (Process process = new Process())
                 {
-                    standardErrorReadTask = process.StandardError.ReadToEndAsync();
-                }
-                else
-                {
-                    process.BeginErrorReadLine();
-                }
+                    process.EnableRaisingEvents = true;
+                    process.Exited += ProcessExited;
 
-                result = _jsonSerializer.DeserializeFromStream<FFProbeResult>(process.StandardOutput.BaseStream);
+                    process.StartInfo.FileName = FFProbePath;
+                    process.StartInfo.Arguments = string.Format("{0} -i {1} -threads 0 -v info -print_format json -show_streams -show_format", probeSizeArgument, inputPath).Trim();
 
-                if (extractChapters)
-                {
-                    standardError = await standardErrorReadTask.ConfigureAwait(false);
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.StartInfo.RedirectStandardError = true;
+
+                    process.StartInfo.CreateNoWindow = true;
+                    process.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
+                    process.StartInfo.ErrorDialog = false;
+
+                    _logger.Debug("{0} {1}", process.StartInfo.FileName, process.StartInfo.Arguments);
+
+                    using (AutoResetEvent outputWaitHandle = new AutoResetEvent(false))
+                    using (AutoResetEvent errorWaitHandle = new AutoResetEvent(false))
+                    {
+                        process.OutputDataReceived += (sender, e) =>
+                            {
+                                if (e.Data == null)
+                                {
+                                    outputWaitHandle.Set();
+                                }
+                                else
+                                {
+                                    output.AppendLine(e.Data);
+                                }
+                            };
+                        process.ErrorDataReceived += (sender, e) =>
+                            {
+                                if (e.Data == null)
+                                {
+                                    errorWaitHandle.Set();
+                                }
+                                else
+                                {
+                                    error.AppendLine(e.Data);
+                                }
+                            };
+
+                        process.Start();
+                        processId = process.Id;
+
+                        process.BeginOutputReadLine();
+                        process.BeginErrorReadLine();
+
+                        int timeout = 60000;
+                        if (process.WaitForExit(timeout) &&
+                            outputWaitHandle.WaitOne(timeout) &&
+                            errorWaitHandle.WaitOne(timeout))
+                        {
+                            // Process completed. Check process.ExitCode here.
+                            success = true;
+                        }
+                        else
+                        {
+                            // Timed out.
+                            success = false;
+                        }
+                    }
                 }
             }
             catch
             {
-                // Hate having to do this
-                try
+                // Try to kill the process
+                if (processId != -1)
                 {
-                    process.Kill();
-                }
-                catch (InvalidOperationException ex1)
-                {
-                    _logger.ErrorException("Error killing ffprobe", ex1);
-                }
-                catch (Win32Exception ex1)
-                {
-                    _logger.ErrorException("Error killing ffprobe", ex1);
+                    try
+                    {
+                        Process proc = Process.GetProcessById(processId);
+                        if (!proc.HasExited)
+                            proc.Kill();
+                    }
+                    catch (InvalidOperationException ex1)
+                    {
+                        _logger.ErrorException("Error killing ffprobe", ex1);
+                    }
+                    catch (Win32Exception ex1)
+                    {
+                        _logger.ErrorException("Error killing ffprobe", ex1);
+                    }
                 }
 
                 throw;
@@ -493,6 +524,11 @@ namespace MediaBrowser.Controller.MediaInfo
                 FFProbeResourcePool.Release();
             }
 
+            if (!success)
+                return null;
+
+            FFProbeResult result = _jsonSerializer.DeserializeFromString<FFProbeResult>(output.ToString());
+
             if (result == null)
             {
                 throw new ApplicationException(string.Format("FFProbe failed for {0}", inputPath));
@@ -500,9 +536,9 @@ namespace MediaBrowser.Controller.MediaInfo
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (extractChapters && !string.IsNullOrEmpty(standardError))
+            if (extractChapters && error.Length > 0)
             {
-                AddChapters(result, standardError);
+                AddChapters(result, error.ToString());
             }
 
             _protobufSerializer.SerializeToFile(result, cacheFile);
@@ -519,7 +555,7 @@ namespace MediaBrowser.Controller.MediaInfo
         {
             var lines = standardError.Split('\n').Select(l => l.TrimStart());
 
-            var chapters = new List<ChapterInfo> { };
+            var chapters = new List<ChapterInfo>();
 
             ChapterInfo lastChapter = null;
 
