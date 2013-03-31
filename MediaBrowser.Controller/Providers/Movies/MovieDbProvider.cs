@@ -241,10 +241,12 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         private const string TmdbConfigUrl = "http://api.themoviedb.org/3/configuration?api_key={0}";
-        private const string TmdbSearch = @"http://api.themoviedb.org/3/search/movie?api_key={1}&query={0}&language={2}";
+        private const string TmdbMovieSearch = @"http://api.themoviedb.org/3/search/movie?api_key={1}&query={0}&language={2}";
+        private const string TmdbCollectionSearch = @"http://api.themoviedb.org/3/search/collection?api_key={1}&query={0}&language={2}";
         private const string TmdbAlternateTitles = @"http://api.themoviedb.org/3/movie/{0}/alternative_titles?api_key={1}&country={2}";
-        private const string TmdbFetchLight = @"http://api.themoviedb.org/3/{3}/{0}?api_key={1}&language={2}";
-        private const string TmdbFetch = @"http://api.themoviedb.org/3/{3}/{0}?api_key={1}&language={2}&append_to_response=casts,images,releases,alternative_titles";
+        private const string TmdbMovieFetchLight = @"http://api.themoviedb.org/3/movie/{0}?api_key={1}&language={2}";
+        private const string TmdbMovieFetch = @"http://api.themoviedb.org/3/movie/{0}?api_key={1}&language={2}&append_to_response=casts,images,releases,alternative_titles";
+        private const string TmdbCollectionFetch = @"http://api.themoviedb.org/3/collection/{0}?api_key={1}&language={2}&append_to_response=images";
         public static string ApiKey = "f6bd687ffa63cd282b6ff2c6877f2669";
 
         static readonly Regex[] NameMatches = new[] {
@@ -367,7 +369,15 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// <returns>Task.</returns>
         private async Task FetchMovieData(BaseItem item, CancellationToken cancellationToken)
         {
-            string id = item.GetProviderId(MetadataProviders.Tmdb) ?? await FindId(item, item.ProductionYear, cancellationToken).ConfigureAwait(false);
+            string id = item.GetProviderId(MetadataProviders.Tmdb);
+            if (id == null)
+            {
+                if (item is Movie)
+                    id = await FindId((Movie)item, item.ProductionYear, cancellationToken).ConfigureAwait(false);
+                else if (item is BoxSet)
+                    id = await FindId((BoxSet)item, item.ProductionYear, cancellationToken).ConfigureAwait(false);
+            }
+
             if (id != null)
             {
                 Logger.Debug("MovieDbProvider - getting movie info with id: " + id);
@@ -413,7 +423,7 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// <param name="productionYear">The production year.</param>
         /// <param name="cancellationToken">The cancellation token</param>
         /// <returns>Task{System.String}.</returns>
-        public async Task<string> FindId(BaseItem item, int? productionYear, CancellationToken cancellationToken)
+        public async Task<string> FindId(Movie item, int? productionYear, CancellationToken cancellationToken)
         {
             string justName = item.Path != null ? item.Path.Substring(item.Path.LastIndexOf(Path.DirectorySeparatorChar)) : string.Empty;
             var id = justName.GetAttributeValue("tmdbid");
@@ -435,27 +445,7 @@ namespace MediaBrowser.Controller.Providers.Movies
             Logger.Info("MovieDbProvider: Finding id for movie: " + name);
             string language = ConfigurationManager.Configuration.PreferredMetadataLanguage.ToLower();
 
-            //if we are a boxset - look at our first child
-            var boxset = item as BoxSet;
-            if (boxset != null)
-            {
-                if (!boxset.Children.IsEmpty)
-                {
-                    var firstChild = boxset.Children.First();
-                    Logger.Debug("MovieDbProvider - Attempting to find boxset ID from: " + firstChild.Name);
-                    string childName;
-                    int? childYear;
-                    ParseName(firstChild.Name, out childName, out childYear);
-                    id = await GetBoxsetIdFromMovie(childName, childYear, language, cancellationToken).ConfigureAwait(false);
-                    if (id != null)
-                    {
-                        Logger.Info("MovieDbProvider - Found Boxset ID: " + id);
-                    }
-                }
-
-                return id;
-            }
-            //nope - search for it
+            // Search for it
             id = await AttemptFindId(name, year, language, cancellationToken).ConfigureAwait(false);
             if (id == null)
             {
@@ -489,6 +479,55 @@ namespace MediaBrowser.Controller.Providers.Movies
             return id;
         }
 
+        public async Task<string> FindId(BoxSet item, int? productionYear, CancellationToken cancellationToken)
+        {
+            string justName = item.Path != null ? item.Path.Substring(item.Path.LastIndexOf(Path.DirectorySeparatorChar)) : string.Empty;
+            string id = justName.GetAttributeValue("tmdbid");
+            
+            if (id != null)
+            {
+                Logger.Debug("Using tmdb id specified in path.");
+                return id;
+            }
+
+            int? year;
+            string name = item.Name;
+            ParseName(name, out name, out year);
+
+            if (year == null && productionYear != null)
+            {
+                year = productionYear;
+            }
+
+            Logger.Info("MovieDbProvider: Finding id for boxset: " + name);
+            string language = ConfigurationManager.Configuration.PreferredMetadataLanguage.ToLower();
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Search for boxset name
+            string url = string.Format(TmdbCollectionSearch, UrlEncode(name), ApiKey, language);
+            TmdbSearchResults<TmdbCollectionSearchResult> searchResult=null;
+
+            try
+            {
+                using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
+                {
+                    searchResult = JsonSerializer.DeserializeFromStream<TmdbSearchResults<TmdbCollectionSearchResult>>(json);
+                }
+            }
+            catch (HttpException)
+            {
+            }
+
+            if (searchResult != null && searchResult.results.Count == 1)
+            {
+                return searchResult.results.First().id.ToString();
+            }
+
+            // Unable to find the Id
+            return null;
+        }
+
         /// <summary>
         /// Attempts the find id.
         /// </summary>
@@ -499,14 +538,14 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// <returns>Task{System.String}.</returns>
         public virtual async Task<string> AttemptFindId(string name, int? year, string language, CancellationToken cancellationToken)
         {
-            string url3 = string.Format(TmdbSearch, UrlEncode(name), ApiKey, language);
-            TmdbMovieSearchResults searchResult = null;
+            string url3 = string.Format(TmdbMovieSearch, UrlEncode(name), ApiKey, language);
+            TmdbSearchResults<TmdbMovieSearchResult> searchResult = null;
 
             try
             {
                 using (Stream json = await HttpClient.Get(url3, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
                 {
-                    searchResult = JsonSerializer.DeserializeFromStream<TmdbMovieSearchResults>(json);
+                    searchResult = JsonSerializer.DeserializeFromStream<TmdbSearchResults<TmdbMovieSearchResult>>(json);
                 }
             }
             catch (HttpException)
@@ -532,13 +571,13 @@ namespace MediaBrowser.Controller.Providers.Movies
                     }
                 }
                 Logger.Info("MovieDBProvider - No results.  Trying replacement numbers: " + name);
-                url3 = string.Format(TmdbSearch, UrlEncode(name), ApiKey, language);
+                url3 = string.Format(TmdbMovieSearch, UrlEncode(name), ApiKey, language);
 
                 try
                 {
                     using (var json = await HttpClient.Get(url3, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
                     {
-                        searchResult = JsonSerializer.DeserializeFromStream<TmdbMovieSearchResults>(json);
+                        searchResult = JsonSerializer.DeserializeFromStream<TmdbSearchResults<TmdbMovieSearchResult>>(json);
                     }
                 }
                 catch (HttpException)
@@ -650,13 +689,13 @@ namespace MediaBrowser.Controller.Providers.Movies
             string childId = await AttemptFindId(name, year, language, cancellationToken).ConfigureAwait(false);
             if (childId != null)
             {
-                string url = string.Format(TmdbFetchLight, childId, ApiKey, language, "movie");
+                string url = string.Format(TmdbMovieFetchLight, childId, ApiKey, language);
 
                 try
                 {
                     using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
                     {
-                        var movieResult = JsonSerializer.DeserializeFromStream<CompleteMovieData>(json);
+                        var movieResult = JsonSerializer.DeserializeFromStream<TmdbMovieData>(json);
 
                         if (movieResult != null && movieResult.belongs_to_collection != null)
                         {
@@ -695,27 +734,39 @@ namespace MediaBrowser.Controller.Providers.Movies
             if (item.GetProviderId(MetadataProviders.Tmdb) == null)
                 item.SetProviderId(MetadataProviders.Tmdb, id);
 
-            CompleteMovieData data = await FetchTmdbMovie(item, id, cancellationToken);
+            TmdbMovieData movieData = null;
+            TmdbBoxsetData boxSetData = null;
+            if (item is BoxSet)
+                boxSetData = await FetchTmdbBoxset((BoxSet)item, id, cancellationToken);
+            if (item is Movie)
+                movieData = await FetchTmdbMovie((Movie)item, id, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (data == null)
+            if (movieData != null)
+                ProcessMainInfo(item, movieData);
+            else if (boxSetData != null)
+                ProcessMainInfo(item, boxSetData);
+            else
+                // None of them contained any data
                 return;
 
-            ProcessMainInfo(item, data);
-
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (data.images != null)
+            if (movieData != null && movieData.images != null)
             {
-                await ProcessImages(item, data.images, cancellationToken).ConfigureAwait(false);
+                await ProcessImages(item, movieData.images, cancellationToken).ConfigureAwait(false);
+            }
+            if (boxSetData != null && boxSetData.images != null)
+            {
+                await ProcessImages(item, boxSetData.images, cancellationToken).ConfigureAwait(false);
             }
 
             //and save locally
-            if (ConfigurationManager.Configuration.SaveLocalMeta)
+            if (ConfigurationManager.Configuration.SaveLocalMeta && movieData != null)
             {
                 var ms = new MemoryStream();
-                JsonSerializer.SerializeToStream(data, ms);
+                JsonSerializer.SerializeToStream(movieData, ms);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -724,22 +775,43 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         /// <summary>
+        /// Fetches the specific collections-id's data.
+        /// Reverts to english language movies if the preferred language is unavailable.
+        /// </summary>
+        protected async Task<TmdbBoxsetData> FetchTmdbBoxset(BoxSet item, string id, CancellationToken cancellationToken)
+        {
+            string url = string.Format(TmdbCollectionFetch, id, ApiKey, ConfigurationManager.Configuration.PreferredMetadataLanguage);
+            string backupUrl = string.Format(TmdbCollectionFetch, id, ApiKey, "en");
+
+            return await FetchTmdbItem<TmdbBoxsetData>(item, url, backupUrl, id, res => res.name, cancellationToken);
+        }
+
+        /// <summary>
         /// Fetches the specific movie-id's data.
         /// Reverts to english language movies if the preferred language is unavailable.
         /// </summary>
-        protected async Task<CompleteMovieData> FetchTmdbMovie(BaseItem item, string id, CancellationToken cancellationToken)
+        protected async Task<TmdbMovieData> FetchTmdbMovie(Movie item, string id, CancellationToken cancellationToken)
         {
-            string itemType = item is BoxSet ? "collection" : "movie";
-            string url = string.Format(TmdbFetch, id, ApiKey, ConfigurationManager.Configuration.PreferredMetadataLanguage, itemType);
-            CompleteMovieData mainResult;
+            string url = string.Format(TmdbMovieFetch, id, ApiKey, ConfigurationManager.Configuration.PreferredMetadataLanguage);
+            string backupUrl = string.Format(TmdbMovieFetch, id, ApiKey, "en");
 
+            return await FetchTmdbItem<TmdbMovieData>(item, url, backupUrl, id, res => res.overview, cancellationToken);
+        }
+
+        /// <summary>
+        /// Fetches some data.
+        /// Reverts to english language movies if the preferred language is unavailable.
+        /// </summary>
+        protected async Task<T> FetchTmdbItem<T>(BaseItem item, string url, string backupUrl, string id, Func<T, string> stringObjGetter, CancellationToken cancellationToken) where T : class
+        {
+            T mainResult;
             cancellationToken.ThrowIfCancellationRequested();
 
             try
             {
-                using (var json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
+                using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
                 {
-                    mainResult = JsonSerializer.DeserializeFromStream<CompleteMovieData>(json);
+                    mainResult = JsonSerializer.DeserializeFromStream<T>(json);
                 }
             }
             catch (HttpException e)
@@ -760,25 +832,24 @@ namespace MediaBrowser.Controller.Providers.Movies
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (mainResult != null && string.IsNullOrEmpty(mainResult.overview))
+            if (mainResult != null && string.IsNullOrEmpty(stringObjGetter(mainResult)))
             {
                 if (ConfigurationManager.Configuration.PreferredMetadataLanguage.ToLower() != "en")
                 {
                     Logger.Info("MovieDbProvider couldn't find meta for language " + ConfigurationManager.Configuration.PreferredMetadataLanguage + ". Trying English...");
-                    url = string.Format(TmdbFetch, id, ApiKey, "en", itemType);
 
                     try
                     {
-                        using (Stream json = await HttpClient.Get(url, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
+                        using (Stream json = await HttpClient.Get(backupUrl, MovieDbResourcePool, cancellationToken).ConfigureAwait(false))
                         {
-                            mainResult = JsonSerializer.DeserializeFromStream<CompleteMovieData>(json);
+                            mainResult = JsonSerializer.DeserializeFromStream<T>(json);
                         }
                     }
                     catch (HttpException)
                     {
                     }
 
-                    if (String.IsNullOrEmpty(mainResult.overview))
+                    if (mainResult == null || string.IsNullOrEmpty(stringObjGetter(mainResult)))
                     {
                         Logger.Error("MovieDbProvider - Unable to find information for " + item.Name + " (id:" + id + ")");
                         return null;
@@ -793,7 +864,7 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// </summary>
         /// <param name="movie">The movie.</param>
         /// <param name="movieData">The movie data.</param>
-        protected virtual void ProcessMainInfo(BaseItem movie, CompleteMovieData movieData)
+        protected virtual void ProcessMainInfo(BaseItem movie, TmdbMovieData movieData)
         {
             if (movie != null && movieData != null)
             {
@@ -883,6 +954,17 @@ namespace MediaBrowser.Controller.Providers.Movies
                 }
             }
 
+        }
+
+        /// <summary>
+        /// Processes the main info.
+        /// </summary>
+        protected virtual void ProcessMainInfo(BaseItem movie, TmdbBoxsetData boxSetData)
+        {
+            if (movie != null && boxSetData != null)
+            {
+                movie.Name = boxSetData.name;
+            }
         }
 
         /// <summary>
@@ -1095,7 +1177,6 @@ namespace MediaBrowser.Controller.Providers.Movies
 
         #region Result Objects
 
-
         /// <summary>
         /// Class TmdbMovieSearchResult
         /// </summary>
@@ -1154,9 +1235,36 @@ namespace MediaBrowser.Controller.Providers.Movies
         }
 
         /// <summary>
-        /// Class TmdbMovieSearchResults
+        /// Class TmdbCollectionSearchResult
         /// </summary>
-        protected class TmdbMovieSearchResults
+        protected class TmdbCollectionSearchResult
+        {
+            /// <summary>
+            /// Gets or sets the backdrop_path.
+            /// </summary>
+            /// <value>The backdrop_path.</value>
+            public string backdrop_path { get; set; }
+            /// <summary>
+            /// Gets or sets the id.
+            /// </summary>
+            /// <value>The id.</value>
+            public int id { get; set; }
+            /// <summary>
+            /// Gets or sets the poster_path.
+            /// </summary>
+            /// <value>The poster_path.</value>
+            public string poster_path { get; set; }
+            /// <summary>
+            /// Gets or sets the name.
+            /// </summary>
+            /// <value>The name.</value>
+            public string name { get; set; }
+        }
+
+        /// <summary>
+        /// Class TmdbSearchResults
+        /// </summary>
+        protected class TmdbSearchResults<T>
         {
             /// <summary>
             /// Gets or sets the page.
@@ -1167,7 +1275,7 @@ namespace MediaBrowser.Controller.Providers.Movies
             /// Gets or sets the results.
             /// </summary>
             /// <value>The results.</value>
-            public List<TmdbMovieSearchResult> results { get; set; }
+            public List<T> results { get; set; }
             /// <summary>
             /// Gets or sets the total_pages.
             /// </summary>
@@ -1512,7 +1620,7 @@ namespace MediaBrowser.Controller.Providers.Movies
         /// <summary>
         /// Class CompleteMovieData
         /// </summary>
-        protected class CompleteMovieData
+        protected class TmdbMovieData
         {
             public bool adult { get; set; }
             public string backdrop_path { get; set; }
@@ -1542,6 +1650,15 @@ namespace MediaBrowser.Controller.Providers.Movies
             public TmdbCastResult casts { get; set; }
             public TmdbAltTitleResults alternative_titles { get; set; }
             public TmdbReleasesResult releases { get; set; }
+        }
+
+        protected class TmdbBoxsetData
+        {
+            public int id { get; set; }
+            public string backdrop_path { get; set; }
+            public string poster_path { get; set; }
+            public string name { get; set; }
+            public TmdbImages images { get; set; }
         }
 
         public class TmdbImageSettings

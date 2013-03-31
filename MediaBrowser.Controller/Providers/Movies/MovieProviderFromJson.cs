@@ -90,7 +90,7 @@ namespace MediaBrowser.Controller.Providers.Movies
                 if (entry.HasValue)
                 {
                     // read in our saved meta and pass to processing function
-                    var movieData = JsonSerializer.DeserializeFromFile<CompleteMovieData>(entry.Value.Path);
+                    var movieData = JsonSerializer.DeserializeFromFile<TmdbMovieData>(entry.Value.Path);
 
                     cancellationToken.ThrowIfCancellationRequested();
 
