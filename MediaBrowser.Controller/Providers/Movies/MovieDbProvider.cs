@@ -762,10 +762,11 @@ namespace MediaBrowser.Controller.Providers.Movies
                 await ProcessImages(item, boxSetData.images, cancellationToken).ConfigureAwait(false);
             }
 
-            //and save locally
+            // Save movie data to cache locally
+            // TODO: Need to make movieData look like what it was before I (Mike) got here before this'll work
             if (ConfigurationManager.Configuration.SaveLocalMeta && movieData != null)
             {
-                var ms = new MemoryStream();
+                MemoryStream ms = new MemoryStream();
                 JsonSerializer.SerializeToStream(movieData, ms);
 
                 cancellationToken.ThrowIfCancellationRequested();
